@@ -1,0 +1,178 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>イラスト立体視シミュレーター — Web Demo</title>
+<style>
+  /* ── 淡いグラデーション背景 + ガラスモーフィズム UI ── */
+  :root {
+    --sand:    #fef6ec;
+    --coral:   #ff8c69;
+    --aqua:    #6fd1c7;
+    --sea:     #3a9ea5;
+    --ink:     #37474f;
+    --glass:   rgba(255, 255, 255, 0.45);
+    --glass-line: rgba(255, 255, 255, 0.65);
+  }
+
+  * { box-sizing: border-box; }
+
+  html, body {
+    margin: 0;
+    height: 100%;
+    overflow: hidden;
+    font-family: "Helvetica Neue", "Hiragino Sans", "Segoe UI", system-ui, sans-serif;
+    font-weight: 300;
+    letter-spacing: 0.02em;
+    color: var(--ink);
+    /* 淡いグラデーション背景 */
+    background:
+      radial-gradient(120% 90% at 15% 0%, #fff3e0 0%, rgba(255,243,224,0) 55%),
+      radial-gradient(120% 120% at 90% 100%, #bdeee8 0%, rgba(189,238,232,0) 50%),
+      linear-gradient(160deg, #ffe7d1 0%, #ffd9c2 22%, #a9e3dd 70%, #7fcbd0 100%);
+  }
+
+  #app { position: fixed; inset: 0; }
+  canvas { display: block; }
+
+  /* 左上のタイトルカード（ガラスモーフィズム） */
+  .brand {
+    position: fixed;
+    top: 24px;
+    left: 24px;
+    padding: 16px 22px;
+    border-radius: 20px;
+    background: var(--glass);
+    border: 1px solid var(--glass-line);
+    backdrop-filter: blur(14px) saturate(1.3);
+    -webkit-backdrop-filter: blur(14px) saturate(1.3);
+    box-shadow: 0 8px 32px rgba(58, 158, 165, 0.18);
+    pointer-events: none;
+    max-width: min(320px, 60vw);
+  }
+  .brand h1 {
+    margin: 0;
+    font-size: 17px;
+    font-weight: 400;
+    letter-spacing: 0.06em;
+  }
+  .brand .dot { color: var(--coral); }
+  .brand p {
+    margin: 6px 0 0;
+    font-size: 12px;
+    line-height: 1.6;
+    opacity: 0.72;
+  }
+
+  /* 下部のヒント */
+  .hint {
+    position: fixed;
+    bottom: 20px;
+    left: 24px;
+    padding: 9px 16px;
+    border-radius: 999px;
+    background: var(--glass);
+    border: 1px solid var(--glass-line);
+    backdrop-filter: blur(10px);
+    -webkit-backdrop-filter: blur(10px);
+    font-size: 11.5px;
+    opacity: 0.8;
+    pointer-events: none;
+  }
+
+  /* 一時トースト（画面下中央、一定時間後にフェードアウト）*/
+  .toast {
+    position: fixed;
+    bottom: 60px;
+    left: 50%;
+    transform: translate(-50%, 8px);
+    padding: 11px 20px;
+    border-radius: 14px;
+    background: rgba(255, 255, 255, 0.55);
+    border: 1px solid var(--glass-line);
+    backdrop-filter: blur(14px) saturate(1.3);
+    -webkit-backdrop-filter: blur(14px) saturate(1.3);
+    box-shadow: 0 8px 28px rgba(58, 158, 165, 0.22);
+    font-size: 12.5px;
+    color: var(--ink);
+    letter-spacing: 0.02em;
+    opacity: 0;
+    pointer-events: none;
+    transition: opacity 0.28s ease, transform 0.28s ease;
+    z-index: 10;
+  }
+  .toast.show {
+    opacity: 1;
+    transform: translate(-50%, 0);
+  }
+  .toast .icon {
+    color: var(--coral);
+    margin-right: 6px;
+    font-weight: 500;
+  }
+
+  /* ── lil-gui の CSS トークン上書きでテーマ配色に統一 ── */
+  .lil-gui {
+    --background-color: rgba(255, 255, 255, 0.42);
+    --title-background-color: rgba(255, 255, 255, 0.55);
+    --title-text-color: #2f6f74;
+    --text-color: #3a5257;
+    --widget-color: rgba(111, 209, 199, 0.28);
+    --hover-color: rgba(111, 209, 199, 0.45);
+    --focus-color: rgba(255, 140, 105, 0.55);
+    --number-color: #e0765a;
+    --string-color: #3a9ea5;
+    --slider-knob-color: #ff8c69;
+    --slider-input-color: var(--sea);
+    --slider-input-focus-color: var(--coral);
+    --font-size: 12px;
+    --input-font-size: 12px;
+    --widget-height: 22px;
+    --padding: 9px;
+    --spacing: 6px;
+    --border-radius: 12px;
+    --font-family: inherit;
+
+    top: 24px;
+    right: 24px;
+    /* ガラスモーフィズム */
+    border-radius: 18px;
+    overflow: hidden;
+    border: 1px solid var(--glass-line);
+    backdrop-filter: blur(16px) saturate(1.4);
+    -webkit-backdrop-filter: blur(16px) saturate(1.4);
+    box-shadow: 0 10px 36px rgba(58, 158, 165, 0.22);
+  }
+  .lil-gui.root > .title {
+    font-weight: 400;
+    letter-spacing: 0.08em;
+  }
+  .lil-gui .title { border: none; }
+</style>
+</head>
+<body>
+  <div id="app"></div>
+
+  <div class="brand">
+    <h1>イラスト立体視シミュレーター<span class="dot">.</span></h1>
+    <p>視差マッピング+ホログラムシール表現を利用したシミュレーターです。右のパネルで操作できます。
+      <br>イラストは透過で分けたものを読み込んでください。
+      <br>最大4枚まで対応</p>
+  </div>
+  <div class="hint">マウスを動かすと傾く / drag で移動 / scroll でズーム / スペースキーでUIを切り替え / パネルから画像を読み込み</div>
+  <div id="toast" class="toast" role="status" aria-live="polite"></div>
+
+  <!-- three.js と lil-gui を CDN から ESM 形式で読み込み -->
+  <script type="importmap">
+  {
+    "imports": {
+      "three": "https://unpkg.com/three@0.160.0/build/three.module.js",
+      "three/addons/": "https://unpkg.com/three@0.160.0/examples/jsm/",
+      "lil-gui": "https://cdn.jsdelivr.net/npm/lil-gui@0.19.2/dist/lil-gui.esm.min.js"
+    }
+  }
+  </script>
+  <script type="module" src="./main.js"></script>
+</body>
+</html>
