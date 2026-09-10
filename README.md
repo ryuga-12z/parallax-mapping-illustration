@@ -1,14 +1,15 @@
 # parallax-mapping-illustration
 
-2.5Dイラスト向けの 4 レイヤー視差マッピング＋ホログラムシール表現シェーダー。
+イラスト立体視向けの 4 レイヤー視差マッピング＋ホログラムシール表現シェーダー。
 1 枚のイラストを「奥行きのある箱の中」のように見せる Unity URP シェーダーと、ブラウザのデモを同梱しています。
 
-- **Unity URP 版（本体）**：[`unity/`](./unity/) — HLSL シェーダー + IMGUI コントローラー + マウス傾斜スクリプト
-- **Web デモ（GLSL 移植）**：[`docs/`](./docs/) — three.js / WebGL2 でブラウザ上で動作。GitHub Pages公開用
+https://github.com/user-attachments/assets/6761dec0-9c70-4f4e-a2a5-332d5d8e368c
+
+---
 
 ## デモ
 
-GitHub Pages :
+GitHub Pages : https://ryuga-12z.github.io/parallax-mapping-illustration/
 
 
 ## リポジトリ構成
