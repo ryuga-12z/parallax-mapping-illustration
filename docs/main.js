@@ -24,13 +24,11 @@ const DEG = Math.PI / 180;
 const TILT_AMP = MAX_ANGLE * -0.5;
 
 // ── モバイル ───────────────────────────────────────────
-// ジャイロの正規化基準角。この角度で最大チルトに到達する。
-// 30°: 手首を軽くひねる程度で振り切れる、実機で無理のない範囲だから。
+// ジャイロの正規化基準角。この角度で最大チルトに到達する。。
 const GYRO_MAX_TILT_DEG = 30;
 // ジャイロ生値は手ブレで暴れるから、毎フレームこの係数で目標へ寄せて馴らす。
-// 既存の slerp チルトの前段に置くことで二段スムージングになって落ち着く。
-// 0.15 だと実機で「もっさり」体感あったから 0.35 に上げて追従性を稼ぐ（暫定値、微調整の余地あり）。
-const GYRO_SMOOTHING = 0.35;
+// 既存の slerp チルトの前段に置くことで二段スムージングになって落ち着く。（暫定値、微調整の余地あり）。
+const GYRO_SMOOTHING = 0.5;
 
 // モード判定はページロード時に一度だけ確定させる。
 // 回転や画面幅変更で切り替わると入力系の張り替えが要って事故るから、固定してしまう。
@@ -533,6 +531,18 @@ let gyroTargetNx = 0, gyroTargetNy = 0;
 let gyroActive = false;
 // 起動時の端末角度の基準。初回イベントで確保して、以降はここからの相対角で傾ける。null = 未確保。
 let gyroBaseBeta = null, gyroBaseGamma = null;
+// 基準確保時の画面向き（screen.orientation.angle）。
+// これが変わったら＝端末を回した＝軸の写像が変わるから、基準ごと取り直す判定に使う。
+let gyroBaseAngle = null;
+
+// 今の画面向きの角度を取る。screen.orientation.angle 優先で、非対応環境は window.orientation にフォールバック。
+// どっちも取れなければ 0（ポートレート扱い）で妥協する。
+function getOrientationAngle() {
+  if (screen.orientation && typeof screen.orientation.angle === 'number') {
+    return screen.orientation.angle;
+  }
+  return typeof window.orientation === 'number' ? window.orientation : 0;
+}
 
 if (!IS_MOBILE) {
   // モバイルでは pointermove を登録しない。
@@ -547,18 +557,42 @@ if (!IS_MOBILE) {
 
 // beta（前後傾）→ X 軸、gamma（左右傾）→ Y 軸。±GYRO_MAX_TILT_DEG で振り切る。
 function onDeviceOrientation(e) {
-  const beta = e.beta, gamma = e.gamma;
   // 値が来ないイベントや NaN はそのまま使うと quad が一瞬飛ぶから捨てる。
-  if (beta == null || gamma == null) return;
-  if (Number.isNaN(beta) || Number.isNaN(gamma)) return;
+  if (e.beta == null || e.gamma == null) return;
+  if (Number.isNaN(e.beta) || Number.isNaN(e.gamma)) return;
+
+  const angle = getOrientationAngle();
+
+  // DeviceOrientationEvent の beta/gamma は「端末固定フレーム」の物理角度で、
+  // screen.orientation を一切考慮しない仕様。だから端末を横に回すと、画面の見た目上の上下左右と
+  // beta/gamma の軸がズレて、縦持ちのキャリブレそのままだとランドスケープで軸が破綻する。
+  // ここで画面向きごとに beta/gamma を「ポートレート相当の軸」へ写像し直して辻褄を合わせる。
+  // beta ≈ 端末長辺の傾き / gamma ≈ 端末短辺の傾き（ポートレート時）。
+  let axialBeta, axialGamma;
+  switch (angle) {
+    case 90:  // 左90°回転（landscape-primary）
+      axialBeta = -e.gamma; axialGamma =  e.beta;  break;
+    case -90:
+    case 270: // 右90°回転（landscape-secondary）
+      axialBeta =  e.gamma; axialGamma = -e.beta;  break;
+    case 180: // 180°回転（portrait upside-down）
+      axialBeta = -e.beta;  axialGamma = -e.gamma; break;
+    default:  // 0 or unknown → ポートレート扱い
+      axialBeta =  e.beta;  axialGamma =  e.gamma; break;
+  }
+
   // 起動時の姿勢を基準（水平＝中心）にしたいから、初回イベントの角度を確保する。
   // これで斜めに持って開いても、その持ち方が中心になる。リロードで基準はリセットされる。
-  if (gyroBaseBeta === null) {
-    gyroBaseBeta = beta;
-    gyroBaseGamma = gamma;
+  // あと画面向きが変わったとき（gyroBaseAngle !== angle）も基準を取り直す。
+  // 写像が切り替わった瞬間の姿勢を新しい中心に据え直さないと、回した直後にガクッと飛ぶから。
+  // これで orientationchange を別途購読しなくても、次のイベントで自動的にリセットがかかる。
+  if (gyroBaseBeta === null || gyroBaseAngle !== angle) {
+    gyroBaseBeta = axialBeta;
+    gyroBaseGamma = axialGamma;
+    gyroBaseAngle = angle;
   }
-  const rb = beta  - gyroBaseBeta;
-  const rg = gamma - gyroBaseGamma;
+  const rb = axialBeta  - gyroBaseBeta;
+  const rg = axialGamma - gyroBaseGamma;
   // 実機で上下左右とも逆だったから両軸とも符号反転。傾けた向きにイラストが付いてくる感じにする。
   gyroTargetNy = -clamp(rb / GYRO_MAX_TILT_DEG, -1, 1);
   gyroTargetNx = -clamp(rg / GYRO_MAX_TILT_DEG, -1, 1);
