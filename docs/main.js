@@ -23,6 +23,33 @@ const DEG = Math.PI / 180;
 // 値を大きくするとホログラムのリングマスク発火帯を横断しやすくなる。
 const TILT_AMP = MAX_ANGLE * -0.5;
 
+// ── モバイル ───────────────────────────────────────────
+// ジャイロの正規化基準角。この角度で最大チルトに到達する。
+// 30°: 手首を軽くひねる程度で振り切れる、実機で無理のない範囲だから。
+const GYRO_MAX_TILT_DEG = 30;
+// ジャイロ生値は手ブレで暴れるから、毎フレームこの係数で目標へ寄せて馴らす。
+// 既存の slerp チルトの前段に置くことで二段スムージングになって落ち着く。
+const GYRO_SMOOTHING = 0.15;
+
+// モード判定はページロード時に一度だけ確定させる。
+// 回転や画面幅変更で切り替わると入力系の張り替えが要って事故るから、固定してしまう。
+const IS_MOBILE = isMobileMode();
+
+// タッチ有無 + （画面幅 or UA）の AND で堅めに判定。
+// タッチ対応 PC の誤爆を避けつつ、実機スマホはほぼ拾える塩梅。
+function isMobileMode() {
+  const hasTouch = ('ontouchstart' in window) || navigator.maxTouchPoints > 0;
+  const narrow = window.innerWidth < 768;
+  const uaMobile = /iPhone|iPad|iPod|Android/i.test(navigator.userAgent);
+  // iPadOS 13+ の「デスクトップ表示」は UA が Macintosh 偽装＆画面幅も広いから、上の条件を全部すり抜ける。
+  // タッチポイント複数持ちの Mac は実質 iPad なので、ここで拾ってモバイル扱いに戻す。
+  const iPadOS = navigator.maxTouchPoints > 1 && /Macintosh/.test(navigator.userAgent);
+  return hasTouch && (narrow || uaMobile || iPadOS);
+}
+
+const clamp = (v, lo, hi) => Math.min(hi, Math.max(lo, v));
+const lerp  = (a, b, t) => a + (b - a) * t;
+
 // ── レンダラー ─────────────────────────────────────────
 // alpha:true + premultiplied 出力により、透明部分は CSS 背景が透ける。
 const renderer = new THREE.WebGLRenderer({ antialias: true, alpha: true });
@@ -452,6 +479,21 @@ function buildGUI() {
     actions[actKey] = () => pickFile(uniformKey, slotIndex, ctrl, label);
   }
 
+  // モバイルは下部ドロワー化。ルートタイトルをハンドルにしてタップで開閉する。
+  if (IS_MOBILE) {
+    // gui.$title はルートのタイトル要素。内部フォルダのタイトルまで拾わないようこれに絞る。
+    const rootTitle = gui.$title || gui.domElement.querySelector(':scope > .title');
+    if (rootTitle) {
+      // capture フェーズ + stopImmediatePropagation で lil-gui 既定の「ルート折りたたみ」を止める。
+      // このクリックはドロワー開閉だけに使い、中身は常に開いた状態を保たせたいから。
+      rootTitle.addEventListener('click', (e) => {
+        e.stopImmediatePropagation();
+        gui.domElement.classList.toggle('drawer-open');
+      }, true);
+    }
+    // 初期は折りたたみ（drawer-open は付けない）。
+  }
+
   // スペースキーで GUI・タイトルカード・ヒントの表示 / 非表示を一括切替（Unity 版 GUI と同挙動）。
   // 入力系要素にフォーカスがある場合は誤動作防止のためスキップする。
   const overlayEls = document.querySelectorAll('.brand, .hint');
@@ -467,14 +509,91 @@ function buildGUI() {
   });
 }
 
-// ── マウスホバー傾斜 ───────────────────────────────────
-// マウス位置を画面中心基準で -1〜1 に正規化。
-// ny は上を + にしたいため符号反転する。
+// ── 傾斜入力（デスクトップ=マウス / モバイル=ジャイロ）──────
+// nx, ny は画面中心基準の -1〜1。ny は上を + にしたいため符号反転で扱う。
 let nx = 0, ny = 0;
-window.addEventListener('pointermove', (e) => {
-  nx = (e.clientX / window.innerWidth) * 2 - 1;
-  ny = -((e.clientY / window.innerHeight) * 2 - 1);
-});
+// ジャイロの目標値（生値を正規化したもの）。animate 内でここへ nx/ny を寄せて馴らす。
+let gyroTargetNx = 0, gyroTargetNy = 0;
+let gyroActive = false;
+
+if (!IS_MOBILE) {
+  // モバイルでは pointermove を登録しない。
+  // 「登録してから無効化」だと解除漏れで暴発しうるから、そもそも張らない方が確実。
+  window.addEventListener('pointermove', (e) => {
+    nx = (e.clientX / window.innerWidth) * 2 - 1;
+    ny = -((e.clientY / window.innerHeight) * 2 - 1);
+  });
+} else {
+  setupMobileInput();
+}
+
+// beta（前後傾）→ X 軸、gamma（左右傾）→ Y 軸。±GYRO_MAX_TILT_DEG で振り切る。
+function onDeviceOrientation(e) {
+  const beta = e.beta, gamma = e.gamma;
+  // 値が来ないイベントや NaN はそのまま使うと quad が一瞬飛ぶから捨てる。
+  if (beta == null || gamma == null) return;
+  if (Number.isNaN(beta) || Number.isNaN(gamma)) return;
+  gyroTargetNy = clamp(beta  / GYRO_MAX_TILT_DEG, -1, 1);
+  gyroTargetNx = clamp(gamma / GYRO_MAX_TILT_DEG, -1, 1);
+}
+
+function startGyro() {
+  if (gyroActive) return; // 二重購読でイベントが倍載りするのを防ぐ
+  gyroActive = true;
+  window.addEventListener('deviceorientation', onDeviceOrientation);
+}
+
+// body.mobile 付与 + ジャイロ購読開始。iOS 13+ は権限が要るのでオーバーレイ経由にする。
+function setupMobileInput() {
+  document.body.classList.add('mobile');
+
+  const overlay = document.getElementById('gyro-overlay');
+  const needsPermission =
+    typeof DeviceOrientationEvent !== 'undefined' &&
+    typeof DeviceOrientationEvent.requestPermission === 'function';
+
+  if (needsPermission && overlay) {
+    // iOS はユーザー操作起点でしか権限を出せないので、ボタン付きオーバーレイを見せる。
+    showGyroOverlay(overlay);
+  } else if (typeof DeviceOrientationEvent !== 'undefined') {
+    // Android 等は権限不要。即購読。
+    startGyro();
+  }
+  // DeviceOrientationEvent 自体が無い端末は nx=ny=0 のまま（チルト無効）。
+}
+
+function showGyroOverlay(overlay) {
+  const btn = overlay.querySelector('#gyro-enable');
+  const msg = overlay.querySelector('.gyro-msg');
+  overlay.hidden = false;
+
+  const closeOverlay = () => { overlay.hidden = true; };
+
+  // iOS Safari は一度 deny すると同一オリジンで二度と許可ダイアログを出さない（以後は自動 denied）。
+  // だから「再度許可」ボタンは実質機能しない。拒否後は設定リセットへ誘導し、ボタンは閉じるだけに差し替える。
+  const onDenied = () => {
+    msg.textContent =
+      '許可が拒否されました。ジャイロを使うには、Safari の 設定 > Safari > 詳細 > Webサイトデータ から本サイトのデータを削除するか、モーション/センサーの許可をリセットしてください。';
+    btn.textContent = '閉じる';
+    btn.removeEventListener('click', onEnableClick);
+    btn.addEventListener('click', closeOverlay);
+  };
+
+  const onEnableClick = () => {
+    DeviceOrientationEvent.requestPermission()
+      .then((state) => {
+        if (state === 'granted') {
+          overlay.hidden = true;
+          startGyro();
+        } else {
+          onDenied();
+        }
+      })
+      .catch(onDenied);
+  };
+
+  btn.addEventListener('click', onEnableClick);
+}
 
 const targetEuler = new THREE.Euler();
 const targetQuat  = new THREE.Quaternion();
@@ -486,6 +605,11 @@ function animate() {
 
   if (mesh) {
     const dt = clock.getDelta();
+    if (IS_MOBILE && gyroActive) {
+      // ジャイロ生値を目標に、nx/ny を毎フレーム寄せて手ブレを吸収する（この後の slerp が二段目）。
+      nx = lerp(nx, gyroTargetNx, GYRO_SMOOTHING);
+      ny = lerp(ny, gyroTargetNy, GYRO_SMOOTHING);
+    }
     // 目標角: X = ny * TILT_AMP°, Y = nx * TILT_AMP°, Z = 0
     targetEuler.set(ny * TILT_AMP * DEG, nx * TILT_AMP * DEG, 0, 'XYZ');
     targetQuat.setFromEuler(targetEuler);

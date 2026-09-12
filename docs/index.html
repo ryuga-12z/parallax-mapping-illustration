@@ -149,6 +149,127 @@
     letter-spacing: 0.08em;
   }
   .lil-gui .title { border: none; }
+
+  /* ── iOS ジャイロ権限オーバーレイ ── */
+  /* モバイルかつ requestPermission 実装ありのときだけ JS が hidden を外す。 */
+  .gyro-overlay {
+    position: fixed;
+    inset: 0;
+    display: grid;
+    place-items: center;
+    padding: 24px;
+    z-index: 20;
+    background: rgba(58, 158, 165, 0.28);
+    backdrop-filter: blur(6px);
+    -webkit-backdrop-filter: blur(6px);
+  }
+  /* class + 属性でUAの [hidden]{display:none} より確実に勝たせる。 */
+  .gyro-overlay[hidden] { display: none; }
+  .gyro-card {
+    max-width: 320px;
+    text-align: center;
+    padding: 24px;
+    border-radius: 20px;
+    background: rgba(255, 255, 255, 0.75);
+    border: 1px solid var(--glass-line);
+    box-shadow: 0 10px 36px rgba(58, 158, 165, 0.28);
+  }
+  .gyro-msg {
+    margin: 0 0 16px;
+    font-size: 14px;
+    line-height: 1.6;
+    color: var(--ink);
+  }
+  .gyro-btn {
+    appearance: none;
+    -webkit-appearance: none;
+    border: none;
+    border-radius: 999px;
+    padding: 12px 24px;
+    min-height: 44px;
+    font-size: 15px;
+    font-family: inherit;
+    color: #fff;
+    background: var(--coral);
+    box-shadow: 0 6px 18px rgba(255, 140, 105, 0.4);
+    cursor: pointer;
+  }
+
+  /* ── モバイルモード（body.mobile）専用分岐。@media は使わず class で統一 ── */
+  /* 端末負荷対策で blur を軽減（14〜16px → 6px）。GPU 合成の負担がでかいから。 */
+  body.mobile .brand,
+  body.mobile .toast {
+    backdrop-filter: blur(6px) saturate(1.3);
+    -webkit-backdrop-filter: blur(6px) saturate(1.3);
+  }
+  body.mobile .lil-gui {
+    backdrop-filter: blur(6px) saturate(1.4);
+    -webkit-backdrop-filter: blur(6px) saturate(1.4);
+    /* 指で押せるようタッチターゲットを拡大。計画の「44×44px 以上」に合わせてる（PLAN_MOBILE.md:49）。 */
+    --widget-height: 44px;
+    /* 44px ハンドルとの視覚バランスで文字と余白も一段上げる。 */
+    --font-size: 15px;
+    --input-font-size: 15px;
+    --padding: 15px;
+    --spacing: 12px;
+  }
+
+  /* タイトルカードは上部センターへ。段落は畳んでタイトルだけ残す（HTMLはいじらない）。 */
+  body.mobile .brand {
+    left: 50%;
+    right: auto;
+    top: 12px;
+    transform: translateX(-50%);
+    max-width: calc(100vw - 24px);
+  }
+  body.mobile .brand p { display: none; }
+
+  /* ヒントはマウス/スクロール前提の文言なのでモバイルでは隠す。 */
+  body.mobile .hint { display: none; }
+
+  /* トーストは折りたたみ時のドロワー(44px)と被らない高さへ上げる。 */
+  body.mobile .toast { bottom: 90px; }
+
+  /* lil-gui を下部ドロワー化。 */
+  body.mobile .lil-gui.root {
+    position: fixed;
+    left: 0;
+    right: 0;
+    bottom: 0;
+    top: auto;
+    width: 100%;
+    border-radius: 20px 20px 0 0;
+    /* 折りたたみ状態：ハンドル(44px)だけ残して画面外へ落とす。 */
+    transform: translateY(calc(100% - 44px));
+    transition: transform 0.28s ease;
+  }
+  body.mobile .lil-gui.root.drawer-open {
+    transform: translateY(0);
+  }
+  /* 展開時に画面を越えないよう中身をスクロールさせる。 */
+  body.mobile .lil-gui.root > .children {
+    max-height: 60vh;
+    overflow-y: auto;
+  }
+  /* ルートタイトルをドラッグハンドル化。高さ44px、中央に「―」バーを疑似要素で。 */
+  body.mobile .lil-gui.root > .title {
+    height: 44px;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    position: relative;
+  }
+  body.mobile .lil-gui.root > .title::before {
+    content: "";
+    position: absolute;
+    top: 7px;
+    left: 50%;
+    transform: translateX(-50%);
+    width: 40px;
+    height: 4px;
+    border-radius: 2px;
+    background: rgba(47, 111, 116, 0.4);
+  }
 </style>
 </head>
 <body>
@@ -162,6 +283,14 @@
   </div>
   <div class="hint">マウスを動かすと傾く / drag で移動 / scroll でズーム / スペースキーでUIを切り替え / パネルから画像を読み込み</div>
   <div id="toast" class="toast" role="status" aria-live="polite"></div>
+
+  <!-- iOS 用ジャイロ権限オーバーレイ（既定は非表示。モバイル＆requestPermission実装時のみJSが表示）-->
+  <div id="gyro-overlay" class="gyro-overlay" hidden role="dialog" aria-modal="true" aria-labelledby="gyro-overlay-title">
+    <div class="gyro-card">
+      <p id="gyro-overlay-title" class="gyro-msg">端末を傾けてイラストを動かすには、モーションセンサーの許可が必要です。</p>
+      <button id="gyro-enable" class="gyro-btn" type="button">ジャイロを有効にする</button>
+    </div>
+  </div>
 
   <!-- three.js と lil-gui を CDN から ESM 形式で読み込み -->
   <script type="importmap">
