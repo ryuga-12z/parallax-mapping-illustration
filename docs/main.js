@@ -23,6 +23,32 @@ const DEG = Math.PI / 180;
 // 値を大きくするとホログラムのリングマスク発火帯を横断しやすくなる。
 const TILT_AMP = MAX_ANGLE * -0.5;
 
+// ── モバイル ───────────────────────────────────────────
+// ジャイロの正規化基準角。この角度で最大チルトに到達する。。
+const GYRO_MAX_TILT_DEG = 30;
+// ジャイロ生値は手ブレで暴れるから、毎フレームこの係数で目標へ寄せて馴らす。
+// 既存の slerp チルトの前段に置くことで二段スムージングになって落ち着く。（暫定値、微調整の余地あり）。
+const GYRO_SMOOTHING = 0.5;
+
+// モード判定はページロード時に一度だけ確定させる。
+// 回転や画面幅変更で切り替わると入力系の張り替えが要って事故るから、固定してしまう。
+const IS_MOBILE = isMobileMode();
+
+// タッチ有無 + （画面幅 or UA）の AND で堅めに判定。
+// タッチ対応 PC の誤爆を避けつつ、実機スマホはほぼ拾える塩梅。
+function isMobileMode() {
+  const hasTouch = ('ontouchstart' in window) || navigator.maxTouchPoints > 0;
+  const narrow = window.innerWidth < 768;
+  const uaMobile = /iPhone|iPad|iPod|Android/i.test(navigator.userAgent);
+  // iPadOS 13+ の「デスクトップ表示」は UA が Macintosh 偽装＆画面幅も広いから、上の条件を全部すり抜ける。
+  // タッチポイント複数持ちの Mac は実質 iPad なので、ここで拾ってモバイル扱いに戻す。
+  const iPadOS = navigator.maxTouchPoints > 1 && /Macintosh/.test(navigator.userAgent);
+  return hasTouch && (narrow || uaMobile || iPadOS);
+}
+
+const clamp = (v, lo, hi) => Math.min(hi, Math.max(lo, v));
+const lerp  = (a, b, t) => a + (b - a) * t;
+
 // ── レンダラー ─────────────────────────────────────────
 // alpha:true + premultiplied 出力により、透明部分は CSS 背景が透ける。
 const renderer = new THREE.WebGLRenderer({ antialias: true, alpha: true });
@@ -452,29 +478,183 @@ function buildGUI() {
     actions[actKey] = () => pickFile(uniformKey, slotIndex, ctrl, label);
   }
 
-  // スペースキーで GUI・タイトルカード・ヒントの表示 / 非表示を一括切替（Unity 版 GUI と同挙動）。
-  // 入力系要素にフォーカスがある場合は誤動作防止のためスキップする。
+  // モバイルは下部ドロワー化。ルートタイトルをハンドルにしてタップで開閉する。
+  if (IS_MOBILE) {
+    // gui.$title はルートのタイトル要素。内部フォルダのタイトルまで拾わないようこれに絞る。
+    const rootTitle = gui.$title || gui.domElement.querySelector(':scope > .title');
+    if (rootTitle) {
+      // capture フェーズ + stopImmediatePropagation で lil-gui 既定の「ルート折りたたみ」を止める。
+      // このクリックはドロワー開閉だけに使い、中身は常に開いた状態を保たせたいから。
+      rootTitle.addEventListener('click', (e) => {
+        e.stopImmediatePropagation();
+        gui.domElement.classList.toggle('drawer-open');
+      }, true);
+    }
+    // 初期は折りたたみ（drawer-open は付けない）。
+  }
+
+  // GUI・タイトルカード・ヒントの表示 / 非表示を一括切替（Unity 版 GUI と同挙動）。
+  // PC は Space キー、モバイルは専用ボタンから叩くけど、同じ uiVisible ステートを共有させて挙動を一本化する。
   const overlayEls = document.querySelectorAll('.brand, .hint');
+  const uiToggleBtn = document.getElementById('ui-toggle');
   let uiVisible = true;
+
+  const toggleUI = () => {
+    uiVisible = !uiVisible;
+    gui.show(uiVisible);
+    overlayEls.forEach((el) => { el.hidden = !uiVisible; });
+    // トグルボタン自体は隠さない（隠すと二度と戻せなくなるから）。押下状態だけ同期しとく。
+    if (uiToggleBtn) uiToggleBtn.setAttribute('aria-pressed', String(uiVisible));
+  };
+
+  // 入力系要素にフォーカスがある場合は誤動作防止のためスキップする。
   window.addEventListener('keydown', (e) => {
     if (e.code !== 'Space') return;
     const t = e.target;
     if (t && (t.tagName === 'INPUT' || t.tagName === 'TEXTAREA' || t.isContentEditable)) return;
     e.preventDefault();
-    uiVisible = !uiVisible;
-    gui.show(uiVisible);
-    overlayEls.forEach((el) => { el.hidden = !uiVisible; });
+    toggleUI();
   });
+
+  // モバイルは Space が使えないから専用ボタンを出す（PC は hidden のまま Space で担保）。
+  if (IS_MOBILE && uiToggleBtn) {
+    uiToggleBtn.hidden = false;
+    uiToggleBtn.addEventListener('click', toggleUI);
+  }
 }
 
-// ── マウスホバー傾斜 ───────────────────────────────────
-// マウス位置を画面中心基準で -1〜1 に正規化。
-// ny は上を + にしたいため符号反転する。
+// ── 傾斜入力（デスクトップ=マウス / モバイル=ジャイロ）──────
+// nx, ny は画面中心基準の -1〜1。ny は上を + にしたいため符号反転で扱う。
 let nx = 0, ny = 0;
-window.addEventListener('pointermove', (e) => {
-  nx = (e.clientX / window.innerWidth) * 2 - 1;
-  ny = -((e.clientY / window.innerHeight) * 2 - 1);
-});
+// ジャイロの目標値（生値を正規化したもの）。animate 内でここへ nx/ny を寄せて馴らす。
+let gyroTargetNx = 0, gyroTargetNy = 0;
+let gyroActive = false;
+// 起動時の端末角度の基準。初回イベントで確保して、以降はここからの相対角で傾ける。null = 未確保。
+let gyroBaseBeta = null, gyroBaseGamma = null;
+// 基準確保時の画面向き（screen.orientation.angle）。
+// これが変わったら＝端末を回した＝軸の写像が変わるから、基準ごと取り直す判定に使う。
+let gyroBaseAngle = null;
+
+// 今の画面向きの角度を取る。screen.orientation.angle 優先で、非対応環境は window.orientation にフォールバック。
+// どっちも取れなければ 0（ポートレート扱い）で妥協する。
+function getOrientationAngle() {
+  if (screen.orientation && typeof screen.orientation.angle === 'number') {
+    return screen.orientation.angle;
+  }
+  return typeof window.orientation === 'number' ? window.orientation : 0;
+}
+
+if (!IS_MOBILE) {
+  // モバイルでは pointermove を登録しない。
+  // 「登録してから無効化」だと解除漏れで暴発しうるから、そもそも張らない方が確実。
+  window.addEventListener('pointermove', (e) => {
+    nx = (e.clientX / window.innerWidth) * 2 - 1;
+    ny = -((e.clientY / window.innerHeight) * 2 - 1);
+  });
+} else {
+  setupMobileInput();
+}
+
+// beta（前後傾）→ X 軸、gamma（左右傾）→ Y 軸。±GYRO_MAX_TILT_DEG で振り切る。
+function onDeviceOrientation(e) {
+  // 値が来ないイベントや NaN はそのまま使うと quad が一瞬飛ぶから捨てる。
+  if (e.beta == null || e.gamma == null) return;
+  if (Number.isNaN(e.beta) || Number.isNaN(e.gamma)) return;
+
+  const angle = getOrientationAngle();
+
+  // DeviceOrientationEvent の beta/gamma は「端末固定フレーム」の物理角度で、
+  // screen.orientation を一切考慮しない仕様。だから端末を横に回すと、画面の見た目上の上下左右と
+  // beta/gamma の軸がズレて、縦持ちのキャリブレそのままだとランドスケープで軸が破綻する。
+  // ここで画面向きごとに beta/gamma を「ポートレート相当の軸」へ写像し直して辻褄を合わせる。
+  // beta ≈ 端末長辺の傾き / gamma ≈ 端末短辺の傾き（ポートレート時）。
+  let axialBeta, axialGamma;
+  switch (angle) {
+    case 90:  // 左90°回転（landscape-primary）
+      axialBeta = -e.gamma; axialGamma =  e.beta;  break;
+    case -90:
+    case 270: // 右90°回転（landscape-secondary）
+      axialBeta =  e.gamma; axialGamma = -e.beta;  break;
+    case 180: // 180°回転（portrait upside-down）
+      axialBeta = -e.beta;  axialGamma = -e.gamma; break;
+    default:  // 0 or unknown → ポートレート扱い
+      axialBeta =  e.beta;  axialGamma =  e.gamma; break;
+  }
+
+  // 起動時の姿勢を基準（水平＝中心）にしたいから、初回イベントの角度を確保する。
+  // これで斜めに持って開いても、その持ち方が中心になる。リロードで基準はリセットされる。
+  // あと画面向きが変わったとき（gyroBaseAngle !== angle）も基準を取り直す。
+  // 写像が切り替わった瞬間の姿勢を新しい中心に据え直さないと、回した直後にガクッと飛ぶから。
+  // これで orientationchange を別途購読しなくても、次のイベントで自動的にリセットがかかる。
+  if (gyroBaseBeta === null || gyroBaseAngle !== angle) {
+    gyroBaseBeta = axialBeta;
+    gyroBaseGamma = axialGamma;
+    gyroBaseAngle = angle;
+  }
+  const rb = axialBeta  - gyroBaseBeta;
+  const rg = axialGamma - gyroBaseGamma;
+  // 実機で上下左右とも逆だったから両軸とも符号反転。傾けた向きにイラストが付いてくる感じにする。
+  gyroTargetNy = -clamp(rb / GYRO_MAX_TILT_DEG, -1, 1);
+  gyroTargetNx = -clamp(rg / GYRO_MAX_TILT_DEG, -1, 1);
+}
+
+function startGyro() {
+  if (gyroActive) return; // 二重購読でイベントが倍載りするのを防ぐ
+  gyroActive = true;
+  window.addEventListener('deviceorientation', onDeviceOrientation);
+}
+
+// body.mobile 付与 + ジャイロ購読開始。iOS 13+ は権限が要るのでオーバーレイ経由にする。
+function setupMobileInput() {
+  document.body.classList.add('mobile');
+
+  const overlay = document.getElementById('gyro-overlay');
+  const needsPermission =
+    typeof DeviceOrientationEvent !== 'undefined' &&
+    typeof DeviceOrientationEvent.requestPermission === 'function';
+
+  if (needsPermission && overlay) {
+    // iOS はユーザー操作起点でしか権限を出せないので、ボタン付きオーバーレイを見せる。
+    showGyroOverlay(overlay);
+  } else if (typeof DeviceOrientationEvent !== 'undefined') {
+    // Android 等は権限不要。即購読。
+    startGyro();
+  }
+  // DeviceOrientationEvent 自体が無い端末は nx=ny=0 のまま（チルト無効）。
+}
+
+function showGyroOverlay(overlay) {
+  const btn = overlay.querySelector('#gyro-enable');
+  const msg = overlay.querySelector('.gyro-msg');
+  overlay.hidden = false;
+
+  const closeOverlay = () => { overlay.hidden = true; };
+
+  // iOS Safari は一度 deny すると同一オリジンで二度と許可ダイアログを出さない（以後は自動 denied）。
+  // だから「再度許可」ボタンは実質機能しない。拒否後は設定リセットへ誘導し、ボタンは閉じるだけに差し替える。
+  const onDenied = () => {
+    msg.textContent =
+      '許可が拒否されました。ジャイロを使うには、Safari の 設定 > Safari > 詳細 > Webサイトデータ から本サイトのデータを削除するか、モーション/センサーの許可をリセットしてください。';
+    btn.textContent = '閉じる';
+    btn.removeEventListener('click', onEnableClick);
+    btn.addEventListener('click', closeOverlay);
+  };
+
+  const onEnableClick = () => {
+    DeviceOrientationEvent.requestPermission()
+      .then((state) => {
+        if (state === 'granted') {
+          overlay.hidden = true;
+          startGyro();
+        } else {
+          onDenied();
+        }
+      })
+      .catch(onDenied);
+  };
+
+  btn.addEventListener('click', onEnableClick);
+}
 
 const targetEuler = new THREE.Euler();
 const targetQuat  = new THREE.Quaternion();
@@ -486,6 +666,11 @@ function animate() {
 
   if (mesh) {
     const dt = clock.getDelta();
+    if (IS_MOBILE && gyroActive) {
+      // ジャイロ生値を目標に、nx/ny を毎フレーム寄せて手ブレを吸収する（この後の slerp が二段目）。
+      nx = lerp(nx, gyroTargetNx, GYRO_SMOOTHING);
+      ny = lerp(ny, gyroTargetNy, GYRO_SMOOTHING);
+    }
     // 目標角: X = ny * TILT_AMP°, Y = nx * TILT_AMP°, Z = 0
     targetEuler.set(ny * TILT_AMP * DEG, nx * TILT_AMP * DEG, 0, 'XYZ');
     targetQuat.setFromEuler(targetEuler);

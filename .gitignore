@@ -11,3 +11,7 @@ desktop.ini
 
 # Unity（メタファイルはコピー時に自動生成される想定）
 *.meta
+
+.claude/
+local/
+.sessionlogs/
