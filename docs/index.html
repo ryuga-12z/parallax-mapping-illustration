@@ -270,6 +270,26 @@
     border-radius: 2px;
     background: rgba(47, 111, 116, 0.4);
   }
+
+  /* UI 表示切替の丸ボタン。右上固定でドロワー(z-index相当)より手前に置く。 */
+  /* .brand と同トーンのガラスモーフィズムで馴染ませる。UI を隠しても戻せるようこれだけは残す前提。 */
+  body.mobile #ui-toggle {
+    position: fixed;
+    top: 12px;
+    right: 12px;
+    width: 44px;
+    height: 44px;
+    border-radius: 50%;
+    border: 1px solid var(--glass-line);
+    background: var(--glass);
+    backdrop-filter: blur(6px);
+    -webkit-backdrop-filter: blur(6px);
+    font-size: 20px;
+    line-height: 44px;
+    padding: 0;
+    cursor: pointer;
+    z-index: 20;
+  }
 </style>
 </head>
 <body>
@@ -283,6 +303,9 @@
   </div>
   <div class="hint">マウスを動かすと傾く / drag で移動 / scroll でズーム / スペースキーでUIを切り替え / パネルから画像を読み込み</div>
   <div id="toast" class="toast" role="status" aria-live="polite"></div>
+
+  <!-- モバイル用 UI 表示切替ボタン（PC 版 Space キー相当）。既定は非表示、モバイル時のみ JS が hidden を外す。 -->
+  <button id="ui-toggle" class="ui-toggle" type="button" aria-label="UI表示切替" aria-pressed="true" hidden>👁</button>
 
   <!-- iOS 用ジャイロ権限オーバーレイ（既定は非表示。モバイル＆requestPermission実装時のみJSが表示）-->
   <div id="gyro-overlay" class="gyro-overlay" hidden role="dialog" aria-modal="true" aria-labelledby="gyro-overlay-title">

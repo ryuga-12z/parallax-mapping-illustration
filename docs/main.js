@@ -29,7 +29,8 @@ const TILT_AMP = MAX_ANGLE * -0.5;
 const GYRO_MAX_TILT_DEG = 30;
 // ジャイロ生値は手ブレで暴れるから、毎フレームこの係数で目標へ寄せて馴らす。
 // 既存の slerp チルトの前段に置くことで二段スムージングになって落ち着く。
-const GYRO_SMOOTHING = 0.15;
+// 0.15 だと実機で「もっさり」体感あったから 0.35 に上げて追従性を稼ぐ（暫定値、微調整の余地あり）。
+const GYRO_SMOOTHING = 0.35;
 
 // モード判定はページロード時に一度だけ確定させる。
 // 回転や画面幅変更で切り替わると入力系の張り替えが要って事故るから、固定してしまう。
@@ -494,19 +495,34 @@ function buildGUI() {
     // 初期は折りたたみ（drawer-open は付けない）。
   }
 
-  // スペースキーで GUI・タイトルカード・ヒントの表示 / 非表示を一括切替（Unity 版 GUI と同挙動）。
-  // 入力系要素にフォーカスがある場合は誤動作防止のためスキップする。
+  // GUI・タイトルカード・ヒントの表示 / 非表示を一括切替（Unity 版 GUI と同挙動）。
+  // PC は Space キー、モバイルは専用ボタンから叩くけど、同じ uiVisible ステートを共有させて挙動を一本化する。
   const overlayEls = document.querySelectorAll('.brand, .hint');
+  const uiToggleBtn = document.getElementById('ui-toggle');
   let uiVisible = true;
+
+  const toggleUI = () => {
+    uiVisible = !uiVisible;
+    gui.show(uiVisible);
+    overlayEls.forEach((el) => { el.hidden = !uiVisible; });
+    // トグルボタン自体は隠さない（隠すと二度と戻せなくなるから）。押下状態だけ同期しとく。
+    if (uiToggleBtn) uiToggleBtn.setAttribute('aria-pressed', String(uiVisible));
+  };
+
+  // 入力系要素にフォーカスがある場合は誤動作防止のためスキップする。
   window.addEventListener('keydown', (e) => {
     if (e.code !== 'Space') return;
     const t = e.target;
     if (t && (t.tagName === 'INPUT' || t.tagName === 'TEXTAREA' || t.isContentEditable)) return;
     e.preventDefault();
-    uiVisible = !uiVisible;
-    gui.show(uiVisible);
-    overlayEls.forEach((el) => { el.hidden = !uiVisible; });
+    toggleUI();
   });
+
+  // モバイルは Space が使えないから専用ボタンを出す（PC は hidden のまま Space で担保）。
+  if (IS_MOBILE && uiToggleBtn) {
+    uiToggleBtn.hidden = false;
+    uiToggleBtn.addEventListener('click', toggleUI);
+  }
 }
 
 // ── 傾斜入力（デスクトップ=マウス / モバイル=ジャイロ）──────
@@ -515,6 +531,8 @@ let nx = 0, ny = 0;
 // ジャイロの目標値（生値を正規化したもの）。animate 内でここへ nx/ny を寄せて馴らす。
 let gyroTargetNx = 0, gyroTargetNy = 0;
 let gyroActive = false;
+// 起動時の端末角度の基準。初回イベントで確保して、以降はここからの相対角で傾ける。null = 未確保。
+let gyroBaseBeta = null, gyroBaseGamma = null;
 
 if (!IS_MOBILE) {
   // モバイルでは pointermove を登録しない。
@@ -533,8 +551,17 @@ function onDeviceOrientation(e) {
   // 値が来ないイベントや NaN はそのまま使うと quad が一瞬飛ぶから捨てる。
   if (beta == null || gamma == null) return;
   if (Number.isNaN(beta) || Number.isNaN(gamma)) return;
-  gyroTargetNy = clamp(beta  / GYRO_MAX_TILT_DEG, -1, 1);
-  gyroTargetNx = clamp(gamma / GYRO_MAX_TILT_DEG, -1, 1);
+  // 起動時の姿勢を基準（水平＝中心）にしたいから、初回イベントの角度を確保する。
+  // これで斜めに持って開いても、その持ち方が中心になる。リロードで基準はリセットされる。
+  if (gyroBaseBeta === null) {
+    gyroBaseBeta = beta;
+    gyroBaseGamma = gamma;
+  }
+  const rb = beta  - gyroBaseBeta;
+  const rg = gamma - gyroBaseGamma;
+  // 実機で上下左右とも逆だったから両軸とも符号反転。傾けた向きにイラストが付いてくる感じにする。
+  gyroTargetNy = -clamp(rb / GYRO_MAX_TILT_DEG, -1, 1);
+  gyroTargetNx = -clamp(rg / GYRO_MAX_TILT_DEG, -1, 1);
 }
 
 function startGyro() {
